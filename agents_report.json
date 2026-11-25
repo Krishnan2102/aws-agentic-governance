@@ -1,0 +1,132 @@
+[
+  {
+    "agent_id": "arn:aws:lambda:us-east-1:103316336097:function:shadow-analytics-agent",
+    "name": "shadow-analytics-agent",
+    "type": "lambda-shadow",
+    "region": "us-east-1",
+    "creator": "arn:aws:iam::103316336097:user/sam",
+    "owner_tag": "",
+    "purpose": "Untagged analytics agent deployed without governance tags",
+    "tools": [
+      "list_all_buckets"
+    ],
+    "model": "rule-based-v1",
+    "data_access": [
+      {
+        "policy": "inline:shadow-agent-broad-s3",
+        "actions": [
+          "s3:ListAllMyBuckets"
+        ],
+        "resources": [
+          "*"
+        ]
+      }
+    ],
+    "denied_access": [],
+    "broad_access_flag": true,
+    "role_arn": "arn:aws:iam::103316336097:role/shadow-analytics-agent-role",
+    "created_at": "2026-11-25 21:54:21+05:30",
+    "discovery_source": "lambda:list_functions",
+    "notes_warnings": [
+      "Governance Alert: Untagged shadow agent (missing type=agent tag)",
+      "Security Alert: Wildcard '*' resource permission detected"
+    ]
+  },
+  {
+    "agent_id": "arn:aws:lambda:us-east-1:103316336097:function:agent-tool-caller",
+    "name": "agent-tool-caller",
+    "type": "lambda",
+    "region": "us-east-1",
+    "creator": "arn:aws:iam::103316336097:user/sam",
+    "owner_tag": "krishnan",
+    "purpose": "Retrieves FAQ documents from S3 using tool calls",
+    "tools": [
+      "s3_doc_reader",
+      "keyword_matcher"
+    ],
+    "model": "rule-based-v1",
+    "data_access": [
+      {
+        "policy": "inline:tool-caller-least-privilege",
+        "actions": [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        "resources": [
+          "arn:aws:s3:::agent-crawler-data-krishnan-1795549572",
+          "arn:aws:s3:::agent-crawler-data-krishnan-1795549572/*"
+        ]
+      }
+    ],
+    "denied_access": [],
+    "broad_access_flag": false,
+    "role_arn": "arn:aws:iam::103316336097:role/agent-tool-caller-role",
+    "created_at": "2026-11-25 01:16:28+05:30",
+    "discovery_source": "lambda:list_functions+resourcegroupstaggingapi:get_resources",
+    "notes_warnings": []
+  },
+  {
+    "agent_id": "arn:aws:lambda:us-east-1:103316336097:function:agent-orchestrator",
+    "name": "agent-orchestrator",
+    "type": "lambda",
+    "region": "us-east-1",
+    "creator": "arn:aws:iam::103316336097:user/sam",
+    "owner_tag": "krishnan",
+    "purpose": "Routes incoming queries to specialized Lambda sub-agents",
+    "tools": [
+      "delegate_to_tool_caller",
+      "delegate_to_function_caller"
+    ],
+    "model": "rule-based-router-v1",
+    "data_access": [
+      {
+        "policy": "inline:orchestrator-invoke-subagents",
+        "actions": [
+          "lambda:InvokeFunction"
+        ],
+        "resources": [
+          "arn:aws:lambda:us-east-1:103316336097:function:agent-tool-caller",
+          "arn:aws:lambda:us-east-1:103316336097:function:agent-function-caller"
+        ]
+      }
+    ],
+    "denied_access": [],
+    "broad_access_flag": false,
+    "role_arn": "arn:aws:iam::103316336097:role/agent-orchestrator-role",
+    "created_at": "2026-11-25 01:33:29+05:30",
+    "discovery_source": "lambda:list_functions+resourcegroupstaggingapi:get_resources",
+    "notes_warnings": []
+  },
+  {
+    "agent_id": "arn:aws:lambda:us-east-1:103316336097:function:agent-function-caller",
+    "name": "agent-function-caller",
+    "type": "lambda",
+    "region": "us-east-1",
+    "creator": "arn:aws:iam::103316336097:user/sam",
+    "owner_tag": "krishnan",
+    "purpose": "Executes structured JSON function calls against DynamoDB",
+    "tools": [
+      "get_task_status",
+      "validate_json_schema"
+    ],
+    "model": "groq-llama-3.3-70b-mock",
+    "data_access": [
+      {
+        "policy": "inline:function-caller-ddb-readonly",
+        "actions": [
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ],
+        "resources": [
+          "arn:aws:dynamodb:us-east-1:103316336097:table/AgentTasks"
+        ]
+      }
+    ],
+    "denied_access": [],
+    "broad_access_flag": false,
+    "role_arn": "arn:aws:iam::103316336097:role/agent-function-caller-role",
+    "created_at": "2026-11-25 01:33:17+05:30",
+    "discovery_source": "lambda:list_functions+resourcegroupstaggingapi:get_resources",
+    "notes_warnings": []
+  }
+]
