@@ -63,7 +63,52 @@ def tool_inspect_agent_lineage(records, agent_name):
     return {"error": f"Agent '{agent_name}' not found in current inventory."}
 
 
+def tool_query_inventory(records, keyword=""):
+    """Search across all agents' tools, IAM actions, resources, purpose, and metadata."""
+    kw = keyword.strip().lower()
+    if not kw:
+        return records
+
+    matches = []
+    for r in records:
+        blob = json.dumps(r, default=str).lower()
+        if kw in blob:
+            matches.append(
+                {
+                    "name": r["name"],
+                    "type": r["type"],
+                    "purpose": r["purpose"],
+                    "tools": r["tools"],
+                    "data_access": r["data_access"],
+                    "creator": r["creator"],
+                    "broad_access_flag": r["broad_access_flag"],
+                }
+            )
+    return {
+        "keyword": keyword,
+        "match_count": len(matches),
+        "matches": matches,
+    }
+
+
 TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_inventory",
+            "description": "Searches all discovered agents by keyword across IAM actions, AWS services (e.g. 's3', 'dynamodb', 'lambda'), resource ARNs, tools, creator, or purpose.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "Service, IAM action, tool, or term to filter by (leave empty to list all agents with full details).",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -110,6 +155,29 @@ TOOLS_SCHEMA = [
 ]
 
 
+def _build_compact_snapshot(records):
+    """Build a compact overview of all agents so the LLM can answer general questions immediately."""
+    snapshot = []
+    for r in records:
+        actions = []
+        resources = []
+        for stmt in r.get("data_access", []):
+            actions.extend(stmt.get("actions", []))
+            resources.extend(stmt.get("resources", []))
+        snapshot.append(
+            {
+                "name": r["name"],
+                "type": r["type"],
+                "tools": r["tools"],
+                "iam_actions": actions,
+                "iam_resources": resources,
+                "broad_access_flag": r["broad_access_flag"],
+                "warnings": r["notes_warnings"],
+            }
+        )
+    return snapshot
+
+
 def _call_groq(messages):
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key:
@@ -151,35 +219,38 @@ def run_governance_agent(user_prompt, current_records, regions=None):
     tool_trace = []
 
     if not os.getenv("GROQ_API_KEY", "").strip():
-        # Deterministic fallback if GROQ_API_KEY is missing
+        matches = tool_query_inventory(records, user_prompt)
         audit = tool_audit_security_and_governance(records)
         fallback_msg = (
             f"**[Offline Mode — set `GROQ_API_KEY` in `.env` to enable `{MODEL_ID}`]**\n\n"
             f"- **Total Agents:** {audit['total_agents']}\n"
             f"- **Shadow Agents:** {', '.join(audit['shadow_agents']) or 'None'}\n"
-            f"- **Wildcard IAM Exposure:** {', '.join(audit['broad_access_agents']) or 'None'}"
+            f"- **Wildcard IAM Exposure:** {', '.join(audit['broad_access_agents']) or 'None'}\n"
+            f"- **Direct Keyword Matches:** {matches.get('match_count', 0)}"
         )
         return fallback_msg, records, tool_trace
 
     system_prompt = (
         "You are an AWS Cloud Security & Agentic AI Governance Analyst. "
-        "You have tools to scan AWS regions for AI agents, audit IAM least-privilege boundaries, "
-        "and inspect CloudTrail creator attribution. Always ground your answers in tool outputs "
-        "and highlight concrete IAM actions, resource ARNs, and creator identities."
+        "You can answer both general inventory questions (e.g., which agents use S3, DynamoDB, or specific tools) "
+        "and deep security/lineage audits. Use `query_inventory` when searching across agents by service, action, or keyword, "
+        "`inspect_agent_lineage` for deep single-agent metadata, `audit_security_and_governance` for risk posture, "
+        "and `scan_aws_agents` only when the user explicitly asks to re-scan or refresh live AWS data."
     )
 
+    snapshot = _build_compact_snapshot(records)
     messages = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": (
-                f"Current cached inventory has {len(records)} agent(s): "
-                f"{[r['name'] for r in records]}.\n\nUser request: {user_prompt}"
+                f"Cached inventory ({len(records)} agents):\n"
+                f"{json.dumps(snapshot, indent=2)}\n\n"
+                f"User question: {user_prompt}"
             ),
         },
     ]
 
-    # Up to 4 tool-calling iterations
     for _ in range(4):
         response = _call_groq(messages)
         choice = response["choices"][0]["message"]
@@ -193,29 +264,25 @@ def run_governance_agent(user_prompt, current_records, regions=None):
             fn_name = tc["function"]["name"]
             args = json.loads(tc["function"].get("arguments") or "{}")
 
-            if fn_name == "scan_aws_agents":
+            if fn_name == "query_inventory":
+                output_str = json.dumps(
+                    tool_query_inventory(records, args.get("keyword", "")), default=str
+                )
+            elif fn_name == "scan_aws_agents":
                 result = tool_scan_aws_agents(args.get("regions") or regions or ["us-east-1"])
                 records = result["agents"]
-                summary_for_llm = {
-                    "status": "success",
-                    "total_agents_found": len(records),
-                    "agents_summary": [
-                        {
-                            "name": r["name"],
-                            "type": r["type"],
-                            "creator": r["creator"],
-                            "broad_access_flag": r["broad_access_flag"],
-                            "warnings": r["notes_warnings"],
-                        }
-                        for r in records
-                    ],
-                }
-                output_str = json.dumps(summary_for_llm)
+                output_str = json.dumps(
+                    {
+                        "status": "success",
+                        "total_agents_found": len(records),
+                        "agents_summary": _build_compact_snapshot(records),
+                    }
+                )
             elif fn_name == "audit_security_and_governance":
                 output_str = json.dumps(tool_audit_security_and_governance(records))
             elif fn_name == "inspect_agent_lineage":
                 output_str = json.dumps(
-                    tool_inspect_agent_lineage(records, args.get("agent_name", ""))
+                    tool_inspect_agent_lineage(records, args.get("agent_name", "")), default=str
                 )
             else:
                 output_str = json.dumps({"error": f"Unknown tool {fn_name}"})
