@@ -1,4 +1,3 @@
-```markdown
 # AgentHub — AWS Agentic AI Discovery, Governance & Observability
 
 An automated AWS discovery, IAM blast-radius auditing, and agentic governance framework built with Python, `boto3`, Groq (`openai/gpt-oss-120b`), Langfuse, and Streamlit.
