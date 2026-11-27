@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import time
@@ -278,6 +279,150 @@ def _run_traced_manual_scan(regions):
             }
         ],
     }
+
+
+def _friendly_step_meta(span, is_last_step):
+    step_name = span.get("step", "")
+    step_type = span.get("type", "SPAN")
+
+    if step_type == "GENERATION":
+        if is_last_step:
+            return (
+                "AI Final Response",
+                "Synthesized the findings into a clear governance answer",
+                "#EC4899",
+                "rgba(236, 72, 153, 0.14)",
+            )
+        return (
+            "AI Reasoning & Planning",
+            "Analyzed your question and selected the right AWS tool",
+            "#A855F7",
+            "rgba(168, 85, 247, 0.15)",
+        )
+
+    lower = step_name.lower()
+    if "query_inventory" in lower:
+        return (
+            "Search AWS Inventory",
+            "Filtered discovered agents by service, action, or keyword",
+            "#38BDF8",
+            "rgba(56, 189, 248, 0.14)",
+        )
+    if "audit_security" in lower:
+        return (
+            "Security & Shadow Audit",
+            "Checked IAM policies for wildcards (*) and missing tags",
+            "#FB7185",
+            "rgba(251, 113, 133, 0.14)",
+        )
+    if "inspect_agent_lineage" in lower:
+        return (
+            "Trace Agent Lineage",
+            "Inspected CloudTrail creator identity and IAM permissions",
+            "#34D399",
+            "rgba(52, 211, 153, 0.14)",
+        )
+    if "scan_aws_agents" in lower or "manual scan" in lower:
+        return (
+            "Live AWS Cloud Scan",
+            "Queried AWS Lambda, IAM, Tagging API, and CloudTrail",
+            "#7CE8FF",
+            "rgba(124, 232, 255, 0.14)",
+        )
+
+    return (
+        step_name,
+        "Executed backend governance operation",
+        "#818CF8",
+        "rgba(129, 140, 248, 0.14)",
+    )
+
+
+def render_trace_flowchart(trace):
+    prompt_text = html.escape(str(trace.get("prompt", "")))
+    spans = trace.get("spans", [])
+    total_ms = trace.get("total_latency_ms", 0)
+    total_tokens = trace.get("total_tokens", 0)
+
+    nodes_html = [
+        f"""
+        <div style="background:#181828; border:1px solid #6366F1; border-radius:14px;
+                    padding:14px 18px; width:100%; max-width:680px; margin:0 auto;
+                    box-shadow:0 4px 18px rgba(99,102,241,0.18);">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="color:#818CF8; font-size:0.75rem; font-weight:800; letter-spacing:0.06em;">
+                    STEP 0 &bull; USER REQUEST
+                </span>
+                <span style="background:rgba(99,102,241,0.2); color:#C7D2FE; padding:2px 10px;
+                             border-radius:999px; font-size:0.72rem; font-weight:700;">START</span>
+            </div>
+            <div style="color:#FFFFFF; font-size:0.95rem; font-weight:600; margin-top:6px;">
+                "{prompt_text}"
+            </div>
+        </div>
+        """
+    ]
+
+    arrow_html = """
+        <div style="text-align:center; padding:6px 0; color:#6366F1; font-size:1.3rem; font-weight:800;">
+            &#8595;
+        </div>
+    """
+
+    for i, sp in enumerate(spans):
+        is_last = i == len(spans) - 1
+        title, subtitle, accent, bg_tint = _friendly_step_meta(sp, is_last)
+        latency = sp.get("latency_ms", 0)
+        tokens = sp.get("tokens", 0)
+        token_badge = (
+            f"<span style='background:#222235; color:#E5E7EB; padding:2px 8px; border-radius:999px; "
+            f"font-size:0.72rem; margin-left:6px;'>{tokens} tokens</span>"
+            if tokens
+            else ""
+        )
+
+        nodes_html.append(arrow_html)
+        nodes_html.append(
+            f"""
+            <div style="background:{bg_tint}; border:1px solid {accent}; border-radius:14px;
+                        padding:14px 18px; width:100%; max-width:680px; margin:0 auto;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                    <span style="color:{accent}; font-size:0.75rem; font-weight:800; letter-spacing:0.06em;">
+                        STEP {i + 1} &bull; {html.escape(title.upper())}
+                    </span>
+                    <div>
+                        <span style="background:#151521; color:{accent}; border:1px solid {accent};
+                                     padding:2px 9px; border-radius:999px; font-size:0.72rem; font-weight:700;">
+                            {latency} ms
+                        </span>
+                        {token_badge}
+                    </div>
+                </div>
+                <div style="color:#F3F4F6; font-size:0.9rem; margin-top:6px;">
+                    {html.escape(subtitle)}
+                </div>
+            </div>
+            """
+        )
+
+    nodes_html.append(arrow_html)
+    nodes_html.append(
+        f"""
+        <div style="background:rgba(16,185,129,0.12); border:1px solid #10B981; border-radius:14px;
+                    padding:12px 18px; width:100%; max-width:680px; margin:0 auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="color:#34D399; font-size:0.75rem; font-weight:800; letter-spacing:0.06em;">
+                    COMPLETE &bull; TRACE FINISHED
+                </span>
+                <span style="color:#A7F3D0; font-size:0.78rem; font-weight:700;">
+                    Total: {total_ms} ms &bull; {total_tokens} tokens
+                </span>
+            </div>
+        </div>
+        """
+    )
+
+    st.html("".join(nodes_html))
 
 
 def trigger_scan(regions):
@@ -630,58 +775,40 @@ else:
             )
 
     with tab_traces:
-        st.markdown("#### Live Session Span Latency")
-        all_spans = []
-        for idx, tr in enumerate(st.session_state.session_traces, start=1):
-            for sp in tr.get("spans", []):
-                all_spans.append(
-                    {
-                        "Span": f"#{idx} {sp['step']}",
-                        "Latency (ms)": sp["latency_ms"],
-                        "Type": sp["type"],
-                    }
-                )
+        st.markdown("#### Visual Trace Flowchart")
+        st.caption("See exactly how the AI agent thought, which AWS tools it ran, and how long each step took.")
 
-        if all_spans:
-            span_df = pd.DataFrame(all_spans)
-            lat_chart = (
-                alt.Chart(span_df)
-                .mark_bar(cornerRadiusTopRight=6, cornerRadiusBottomRight=6)
-                .encode(
-                    y=alt.Y("Span:N", sort=None, axis=alt.Axis(labelColor="#D1D5DB", title=None)),
-                    x=alt.X("Latency (ms):Q", axis=alt.Axis(labelColor="#9CA3AF", gridColor="#232336")),
-                    color=alt.Color(
-                        "Type:N",
-                        scale=alt.Scale(domain=["GENERATION", "SPAN"], range=["#EC4899", "#7CE8FF"]),
-                    ),
-                    tooltip=["Span", "Type", "Latency (ms)"],
-                )
-                .properties(height=max(140, len(all_spans) * 34))
-                .configure_view(strokeWidth=0, fill="#151521")
-                .configure(background="#151521")
+        if not st.session_state.session_traces:
+            st.info("Run a crawler scan or ask the Governance Assistant a question to generate a visual trace.")
+        else:
+            trace_labels = [
+                f"#{idx} — {tr['prompt'][:65]} ({tr['total_latency_ms']} ms)"
+                for idx, tr in enumerate(st.session_state.session_traces, start=1)
+            ]
+            selected_idx = st.selectbox(
+                "Select an execution to visualize",
+                options=range(len(trace_labels)),
+                format_func=lambda i: trace_labels[i],
             )
-            st.altair_chart(lat_chart, use_container_width=True)
+            active_trace = st.session_state.session_traces[selected_idx]
 
-        st.markdown("#### Execution Waterfall")
-        for idx, tr in enumerate(st.session_state.session_traces, start=1):
-            header = (
-                f"#{idx} | {tr['prompt'][:75]} — "
-                f"{tr['total_latency_ms']} ms | {tr['total_tokens']} tokens"
-            )
-            with st.expander(header, expanded=(idx == 1)):
-                top_l, top_r = st.columns([3, 1])
-                with top_l:
-                    st.markdown(f"**Langfuse Trace ID:** `{tr.get('trace_id') or 'local-only'}`")
-                with top_r:
-                    if tr.get("trace_url"):
-                        st.link_button("Open in Langfuse", tr["trace_url"], use_container_width=True)
+            meta_l, meta_r = st.columns([3, 1])
+            with meta_l:
+                st.markdown(f"**Langfuse Trace ID:** `{active_trace.get('trace_id') or 'local-only'}`")
+            with meta_r:
+                if active_trace.get("trace_url"):
+                    st.link_button("Open in Langfuse UI", active_trace["trace_url"], use_container_width=True)
 
-                for sp in tr.get("spans", []):
+            st.markdown("<div style='height:0.5rem;'></div>", unsafe_allow_html=True)
+            render_trace_flowchart(active_trace)
+            st.markdown("<div style='height:1rem;'></div>", unsafe_allow_html=True)
+
+            with st.expander("Developer View: Raw Span Payloads (JSON)"):
+                for sp in active_trace.get("spans", []):
                     badge = "badge-alert" if sp["type"] == "GENERATION" else "badge-ok"
                     st.markdown(
                         f"<span class='{badge}'>{sp['type']}</span> "
-                        f"<b>{sp['step']}</b> — <code>{sp['latency_ms']} ms</code>"
-                        + (f" (<code>{sp['tokens']} tokens</code>)" if sp["tokens"] else ""),
+                        f"<b>{sp['step']}</b> — <code>{sp['latency_ms']} ms</code>",
                         unsafe_allow_html=True,
                     )
                     in_col, out_col = st.columns(2)
@@ -693,7 +820,8 @@ else:
                         st.json(sp["output"] if isinstance(sp["output"], (dict, list)) else {"value": sp["output"]})
                     st.divider()
 
-        st.markdown("#### Recent Langfuse Cloud Observations")
+        st.divider()
+        st.markdown("#### Recent Langfuse Cloud History")
         if st.button("Refresh Langfuse History"):
             st.session_state.lf_cloud_cache = fetch_recent_langfuse_traces(limit=10)
 
@@ -705,4 +833,13 @@ else:
         elif not cloud_res["traces"]:
             st.info("Connected to Langfuse Cloud — no observations returned yet.")
         else:
-            st.dataframe(cloud_res["traces"], use_container_width=True, hide_index=True)
+            st.dataframe(
+                cloud_res["traces"],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "url": st.column_config.LinkColumn("Langfuse Trace", display_text="Open Trace"),
+                    "latency_sec": st.column_config.NumberColumn("Latency (s)", format="%.2f s"),
+                    "total_cost": st.column_config.NumberColumn("Cost ($)", format="$%.5f"),
+                },
+            )
