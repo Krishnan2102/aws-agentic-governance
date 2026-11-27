@@ -1,7 +1,14 @@
 import json
 import os
+import time
 import streamlit as st
-from agent_engine import MODEL_ID, run_governance_agent
+from langfuse import get_client, observe
+from agent_engine import (
+    MODEL_ID,
+    _langfuse_enabled,
+    fetch_recent_langfuse_traces,
+    run_governance_agent,
+)
 from crawler import crawl_all_regions, export_reports
 
 st.set_page_config(
@@ -11,10 +18,9 @@ st.set_page_config(
 
 st.title("AWS Agentic AI Discovery & Governance Console")
 st.caption(
-    f"Deterministic Boto3 Cloud Discovery + Autonomous Governance Agent (`{MODEL_ID}` via Groq)"
+    f"Deterministic Boto3 Discovery + Governance Agent (`{MODEL_ID}`) + Langfuse Observability"
 )
 
-# Load existing report on startup if available
 if "agents" not in st.session_state:
     if os.path.exists("agents_report.json"):
         with open("agents_report.json", "r", encoding="utf-8") as f:
@@ -25,6 +31,47 @@ if "agents" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
+if "session_traces" not in st.session_state:
+    st.session_state.session_traces = []
+
+
+@observe(name="manual_ui_crawler_scan", as_type="span")
+def _run_traced_manual_scan(regions):
+    start = time.perf_counter()
+    scanned = crawl_all_regions(regions)
+    export_reports(scanned)
+    elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
+
+    trace_id = None
+    trace_url = None
+    if _langfuse_enabled():
+        try:
+            lf = get_client()
+            trace_id = lf.get_current_trace_id()
+            trace_url = lf.get_trace_url()
+            lf.flush()
+        except Exception:
+            pass
+
+    return scanned, {
+        "trace_id": trace_id,
+        "trace_url": trace_url,
+        "prompt": f"[Manual Button] Crawl regions: {', '.join(regions)}",
+        "total_latency_ms": elapsed_ms,
+        "total_tokens": 0,
+        "spans": [
+            {
+                "step": "Manual Scan — crawl_all_regions",
+                "type": "SPAN",
+                "latency_ms": elapsed_ms,
+                "tokens": 0,
+                "input": {"regions": regions},
+                "output": {"discovered_agents": [a["name"] for a in scanned]},
+            }
+        ],
+    }
+
+
 # --- Sidebar Controls ---
 with st.sidebar:
     st.header("Crawler Controls")
@@ -33,9 +80,9 @@ with st.sidebar:
 
     if st.button("Run AWS Crawler Scan", type="primary", use_container_width=True):
         with st.spinner("Scanning AWS Lambda, IAM, Tagging API, CloudTrail, and Bedrock..."):
-            scanned = crawl_all_regions(target_regions)
-            export_reports(scanned)
+            scanned, manual_trace = _run_traced_manual_scan(target_regions)
             st.session_state.agents = scanned
+            st.session_state.session_traces.insert(0, manual_trace)
         st.success(f"Scan complete: {len(scanned)} agent(s) discovered.")
 
     st.divider()
@@ -60,8 +107,11 @@ with st.sidebar:
             )
 
     st.divider()
-    api_status = "Connected" if os.getenv("GROQ_API_KEY") else "Missing GROQ_API_KEY"
-    st.markdown(f"**LLM Status:** `{api_status}`")
+    st.subheader("Telemetry & Model Status")
+    groq_status = "Connected" if os.getenv("GROQ_API_KEY") else "Missing GROQ_API_KEY"
+    lf_status = "Connected" if _langfuse_enabled() else "Disabled (set keys in .env)"
+    st.markdown(f"**Groq LLM:** `{groq_status}`")
+    st.markdown(f"**Langfuse Tracing:** `{lf_status}`")
 
 agents = st.session_state.agents
 
@@ -79,8 +129,14 @@ col4.metric("Wildcard IAM Alerts", broad_count)
 
 st.divider()
 
-# --- Main Tabs: Inventory Table vs. Agentic Governance Chat ---
-tab_inventory, tab_chat = st.tabs(["Discovered Agent Inventory", "Agentic Governance Assistant"])
+# --- Main Tabs ---
+tab_inventory, tab_chat, tab_traces = st.tabs(
+    [
+        "Discovered Agent Inventory",
+        "Agentic Governance Assistant",
+        "Observability & Langfuse Traces",
+    ]
+)
 
 with tab_inventory:
     if not agents:
@@ -105,7 +161,9 @@ with tab_inventory:
         st.subheader("Detailed IAM Blast Radius & Lineage Inspection")
         for a in agents:
             status_tag = "[ALERT]" if a["notes_warnings"] else "[OK]"
-            with st.expander(f"{status_tag} {a['name']} ({a['type']}) — Role: {a['role_arn'].split('/')[-1]}"):
+            with st.expander(
+                f"{status_tag} {a['name']} ({a['type']}) — Role: {a['role_arn'].split('/')[-1]}"
+            ):
                 left, right = st.columns(2)
                 with left:
                     st.markdown(f"**Agent ARN:** `{a['agent_id']}`")
@@ -122,23 +180,35 @@ with tab_inventory:
 
 with tab_chat:
     st.markdown(
-        "Ask the governance agent to audit IAM risks, inspect a specific agent's CloudTrail lineage, "
-        "or trigger a fresh live AWS scan."
+        "Ask the governance agent to audit IAM risks, query which agents use S3/DynamoDB, "
+        "inspect CloudTrail lineage, or trigger a live AWS scan."
     )
 
     sample_cols = st.columns(3)
-    if sample_cols[0].button("Audit all security & shadow risks", use_container_width=True):
+    if sample_cols[0].button("Which agents utilize S3?", use_container_width=True):
+        st.session_state.pending_prompt = "Which agents utilize S3 and what specific permissions do they have?"
+    if sample_cols[1].button("Audit all security & shadow risks", use_container_width=True):
         st.session_state.pending_prompt = "Audit all discovered agents for IAM wildcard risks and untagged shadow agents."
-    if sample_cols[1].button("Inspect shadow-analytics-agent", use_container_width=True):
-        st.session_state.pending_prompt = "Inspect shadow-analytics-agent and explain why it was flagged."
-    if sample_cols[2].button("Re-scan AWS & summarize posture", use_container_width=True):
-        st.session_state.pending_prompt = "Run a fresh AWS scan in us-east-1 and summarize our governance posture."
+    if sample_cols[2].button("Trace agent-orchestrator lineage", use_container_width=True):
+        st.session_state.pending_prompt = "Trace the full execution chain starting from agent-orchestrator down to S3 and DynamoDB."
 
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg.get("tools"):
-                st.caption(f"Tools executed: `{json.dumps(msg['tools'])}`")
+            if msg.get("trace_meta"):
+                meta = msg["trace_meta"]
+                tool_names = [
+                    s["step"] for s in meta.get("spans", []) if s["type"] == "SPAN"
+                ]
+                caption_parts = [
+                    f"Latency: `{meta['total_latency_ms']} ms`",
+                    f"Tokens: `{meta['total_tokens']}`",
+                ]
+                if tool_names:
+                    caption_parts.append(f"Tools: `{', '.join(tool_names)}`")
+                if meta.get("trace_url"):
+                    caption_parts.append(f"[View in Langfuse]({meta['trace_url']})")
+                st.caption(" | ".join(caption_parts))
 
     user_input = st.chat_input("Ask a question about your AWS agents...")
     if "pending_prompt" in st.session_state:
@@ -152,18 +222,76 @@ with tab_chat:
         with st.chat_message("assistant"):
             with st.spinner(f"Reasoning with {MODEL_ID}..."):
                 try:
-                    reply, updated_records, trace = run_governance_agent(
+                    reply, updated_records, trace_summary = run_governance_agent(
                         user_input, st.session_state.agents, target_regions
                     )
                     st.session_state.agents = updated_records
+                    st.session_state.session_traces.insert(0, trace_summary)
                 except Exception as exc:
                     reply = f"Error running governance agent: `{exc}`"
-                    trace = []
+                    trace_summary = None
 
             st.markdown(reply)
-            if trace:
-                st.caption(f"Tools executed: `{json.dumps(trace)}`")
+            if trace_summary:
+                tool_names = [
+                    s["step"] for s in trace_summary.get("spans", []) if s["type"] == "SPAN"
+                ]
+                caption_parts = [
+                    f"Latency: `{trace_summary['total_latency_ms']} ms`",
+                    f"Tokens: `{trace_summary['total_tokens']}`",
+                ]
+                if tool_names:
+                    caption_parts.append(f"Tools: `{', '.join(tool_names)}`")
+                if trace_summary.get("trace_url"):
+                    caption_parts.append(f"[View in Langfuse]({trace_summary['trace_url']})")
+                st.caption(" | ".join(caption_parts))
 
         st.session_state.chat_history.append(
-            {"role": "assistant", "content": reply, "tools": trace}
+            {"role": "assistant", "content": reply, "trace_meta": trace_summary}
         )
+
+with tab_traces:
+    st.subheader("Session Execution Waterfall (Live Spans & Generations)")
+    if not st.session_state.session_traces:
+        st.info("No traces recorded in this session yet. Run a crawler scan or send a chat query.")
+    else:
+        for idx, tr in enumerate(st.session_state.session_traces, start=1):
+            header = (
+                f"#{idx} | {tr['prompt'][:75]} — "
+                f"{tr['total_latency_ms']} ms | {tr['total_tokens']} tokens"
+            )
+            with st.expander(header, expanded=(idx == 1)):
+                top_l, top_r = st.columns([3, 1])
+                with top_l:
+                    st.markdown(f"**Langfuse Trace ID:** `{tr.get('trace_id') or 'local-only'}`")
+                with top_r:
+                    if tr.get("trace_url"):
+                        st.link_button("Open in Langfuse UI", tr["trace_url"], use_container_width=True)
+
+                for sp in tr.get("spans", []):
+                    st.markdown(
+                        f"**`[{sp['type']}]` {sp['step']}** — `{sp['latency_ms']} ms`"
+                        + (f" (`{sp['tokens']} tokens`)" if sp["tokens"] else "")
+                    )
+                    in_col, out_col = st.columns(2)
+                    with in_col:
+                        st.caption("Input")
+                        st.json(sp["input"] if isinstance(sp["input"], (dict, list)) else {"value": sp["input"]})
+                    with out_col:
+                        st.caption("Output")
+                        st.json(sp["output"] if isinstance(sp["output"], (dict, list)) else {"value": sp["output"]})
+                    st.divider()
+
+    st.subheader("Recent Traces from Langfuse Cloud")
+    if st.button("Refresh Langfuse Cloud History"):
+        st.session_state.lf_cloud_cache = fetch_recent_langfuse_traces(limit=10)
+
+    cloud_res = st.session_state.get("lf_cloud_cache") or fetch_recent_langfuse_traces(limit=10)
+    if not cloud_res["enabled"]:
+        st.warning("Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env` to sync Langfuse Cloud traces.")
+    elif cloud_res["error"]:
+        st.error(f"Langfuse API notice: {cloud_res['error']}")
+    elif not cloud_res["traces"]:
+        st.info("Connected to Langfuse Cloud — no historical traces returned yet.")
+    else:
+        st.dataframe(cloud_res["traces"], use_container_width=True, hide_index=True)
